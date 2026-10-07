@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wx-mcp"
+version = "0.1.0"
+description = "WeChat message push MCP server built on the iLink Bot protocol"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "wechatbot-sdk>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+wx-mcp = "wx_mcp.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["wx_mcp*"]
