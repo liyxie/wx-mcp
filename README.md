@@ -203,6 +203,20 @@ powershell -ExecutionPolicy Bypass -File .\run_background.ps1 -Action restart
 `logs/wx-mcp.err.log`，PID 写入 `run/wx-mcp.pid`。可通过
 `-HostAddr` / `-Port` 或 `WX_MCP_HOST` / `WX_MCP_PORT` 环境变量修改。
 
+Linux 下使用 `run_background.sh`：
+
+```bash
+cd /path/to/wx-mcp
+chmod +x run_background.sh
+./run_background.sh start
+./run_background.sh status
+./run_background.sh stop
+./run_background.sh restart
+```
+
+脚本默认使用 `wx-mcp/.venv/bin/python`，可通过 `WX_MCP_PYTHON` 覆盖；
+`WX_MCP_HOST` / `WX_MCP_PORT` 可修改监听地址。
+
 ## 测试
 
 ```powershell
