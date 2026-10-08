@@ -76,7 +76,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.transport == "stdio":
             run_stdio(server)
         else:
-            run_http(server, args.host, args.port)
+            run_http(
+                server,
+                args.host,
+                args.port,
+                upload_handler=manager.upload_media_bytes,
+            )
     except KeyboardInterrupt:
         pass
     finally:

@@ -78,6 +78,10 @@ class AccountManager:
         account_id = self._validate_account_id(account_id)
         return self._ensure_runtime(account_id).submit_verify_code(code)
 
+    def set_account_nickname(self, account_id: Any, nickname: Any) -> dict[str, Any]:
+        account_id = self._validate_account_id(account_id)
+        return self._ensure_runtime(account_id).set_nickname(nickname)
+
     # ------------------------------------------------------------- logout
 
     def logout_account(self, account_id: Any) -> dict[str, Any]:
@@ -155,5 +159,24 @@ class AccountManager:
             user_id=to_user_id or None,
             file_path=file_path,
             data_base64=data_base64,
+            file_name=file_name,
+        )
+
+    def upload_media_bytes(
+        self,
+        account_id: Any,
+        media_type: Any,
+        data: bytes,
+        *,
+        to_user_id: Any = None,
+        file_name: str | None = None,
+    ) -> dict[str, Any]:
+        account_id = self._validate_account_id(account_id)
+        if not isinstance(data, bytes):
+            raise AccountError("upload data must be bytes")
+        return self._ensure_runtime(account_id).upload_media_bytes(
+            media_type,
+            data,
+            user_id=to_user_id or None,
             file_name=file_name,
         )

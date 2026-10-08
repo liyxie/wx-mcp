@@ -4,8 +4,9 @@ import json
 import pytest
 from wechatbot import MediaType
 
-from wx_mcp.errors import MediaError
+from wx_mcp.errors import ApiError, ContextRequiredError, MediaError
 from wx_mcp.runtime import (
+    _is_prepare_failed,
     _media_item,
     chunk_text,
     media_type_name,
@@ -59,3 +60,15 @@ def test_media_item_is_json_serializable():
     )
     json.dumps(item)
     assert item["file_item"]["file_name"] == "x.pdf"
+
+
+def test_is_prepare_failed_detects_missing_context():
+    assert _is_prepare_failed(ApiError("prepare failed"))
+    assert _is_prepare_failed(ApiError("x", payload={"errmsg": "prepare failed"}))
+    assert not _is_prepare_failed(ApiError("other error"))
+
+
+def test_context_required_error_is_actionable():
+    error = ContextRequiredError("alice@im.wechat")
+    assert "context_token" in str(error)
+    assert "inbound message" in str(error)

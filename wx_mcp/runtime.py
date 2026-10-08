@@ -5,24 +5,32 @@ loop (running in a daemon thread) and its own credential path, so multiple
 WeChat accounts stay fully isolated.
 
 Login and media upload use the SDK's high-level ``WeChatBot`` API. Long-polling
-and message sending go through the SDK's ``ILinkApi`` so wx-mcp can also
-implement the "push to the bound account without a prior context_token" flow
-(the SDK's ``WeChatBot.send`` requires a cached context_token).
+and message sending go through the SDK's ``ILinkApi`` so wx-mcp can cache
+per-recipient context tokens and translate iLink's ``prepare failed`` response
+into an actionable ``ContextRequiredError``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import hashlib
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from wechatbot import MediaType, WeChatBot
 from wechatbot.protocol import ILinkApi, MessageItemType
 
-from .errors import AccountError, ApiError, AuthError, MediaError, NoContextError
+from .errors import (
+    AccountError,
+    ApiError,
+    AuthError,
+    ContextRequiredError,
+    MediaError,
+)
 
 MAX_MSG_LEN = 4000
 
@@ -146,6 +154,19 @@ def _media_item(
     raise MediaError(f"Cannot build message item for media_type {media_type!r}")
 
 
+def _is_prepare_failed(error: ApiError) -> bool:
+    """Return true when the API error is iLink's missing-context failure."""
+    text = str(error).lower()
+    if "prepare failed" in text:
+        return True
+    payload = getattr(error, "payload", None)
+    if isinstance(payload, dict):
+        errmsg = str(payload.get("errmsg") or "").lower()
+        if "prepare failed" in errmsg:
+            return True
+    return False
+
+
 class AccountRuntime:
     """Owns one WeChat account: event loop, WeChatBot, status and actions."""
 
@@ -159,8 +180,12 @@ class AccountRuntime:
     ) -> None:
         self.account_id = account_id
         self.cred_path = Path(cred_path)
+        self.profile_path = self.cred_path.parent / "profile.json"
         self._base_url = base_url
         self._bot_agent = bot_agent
+        self.nickname = ""
+
+        self._load_profile()
 
         self.api = ILinkApi(bot_agent=bot_agent)
         self.bot = WeChatBot(
@@ -212,6 +237,38 @@ class AccountRuntime:
     def has_credentials(self) -> bool:
         return self.bot.get_credentials() is not None or self.cred_path.exists()
 
+    def _load_profile(self) -> None:
+        if not self.profile_path.exists():
+            return
+        try:
+            profile = json.loads(self.profile_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 - a corrupt profile should not block startup
+            return
+        if isinstance(profile, dict):
+            nickname = profile.get("nickname")
+            if isinstance(nickname, str):
+                self.nickname = nickname.strip()
+
+    def _write_profile(self, nickname: str) -> None:
+        self.profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile = {
+            "nickname": nickname,
+            "updated_at": datetime.now().astimezone().isoformat(),
+        }
+        self.profile_path.write_text(
+            json.dumps(profile, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def set_nickname(self, nickname: Any) -> dict[str, Any]:
+        value = str(nickname or "").strip()
+        if len(value) > 64:
+            raise AccountError("nickname must be at most 64 characters")
+        with self._lock:
+            self.nickname = value
+            self._write_profile(value)
+        return {"account_id": self.account_id, "nickname": self.nickname}
+
     # --------------------------------------------------------------- status
 
     def _on_qr_url(self, url: str) -> None:
@@ -247,6 +304,7 @@ class AccountRuntime:
         creds = self.bot.get_credentials()
         return {
             "account_id": self.account_id,
+            "nickname": self.nickname,
             "status": self.status,
             "online": self.online,
             "qr_url": self.qr_url,
@@ -273,6 +331,7 @@ class AccountRuntime:
             creds = self.bot.get_credentials()
             return {
                 "account_id": self.account_id,
+                "nickname": self.nickname,
                 "status": "confirmed",
                 "already_logged_in": True,
                 "user_id": creds.user_id if creds else "",
@@ -449,7 +508,7 @@ class AccountRuntime:
         creds = self._require_creds()
         target = (user_id or "").strip() or creds.user_id
         if not target:
-            raise NoContextError("")
+            raise ContextRequiredError("")
         return target, creds
 
     def send_text(self, text: str, user_id: str | None = None) -> dict[str, Any]:
@@ -460,24 +519,25 @@ class AccountRuntime:
             raise ValueError("Message text cannot be empty")
         target, creds = self._resolve_target(user_id)
         context_token = self.bot._context_tokens.get(target)
-        mode = "reply" if context_token else "push"
-        if not context_token and target != creds.user_id:
-            raise NoContextError(target)
+        if not context_token:
+            raise ContextRequiredError(target)
 
         chunks = chunk_text(text.strip())
         for i, chunk in enumerate(chunks):
             if len(chunks) > 1:
                 chunk = f"[{i + 1}/{len(chunks)}]\n{chunk}"
-            msg = self.api.build_text_message(target, context_token or "", chunk)
-            if not context_token:
-                msg["from_user_id"] = creds.account_id
-                msg.pop("context_token", None)
-            await self.api.send_message(creds.base_url, creds.token, msg)
+            msg = self.api.build_text_message(target, context_token, chunk)
+            try:
+                await self.api.send_message(creds.base_url, creds.token, msg)
+            except ApiError as e:
+                if _is_prepare_failed(e):
+                    raise ContextRequiredError(target, stale=True) from e
+                raise
         return {
             "to_user_id": target,
             "chunks": len(chunks),
             "chars": len(text),
-            "mode": mode,
+            "mode": "reply",
         }
 
     def send_media(
@@ -517,9 +577,8 @@ class AccountRuntime:
         mt = normalize_media_type(media_type)
         target, creds = self._resolve_target(user_id)
         context_token = self.bot._context_tokens.get(target)
-        mode = "reply" if context_token else "push"
-        if not context_token and target != creds.user_id:
-            raise NoContextError(target)
+        if not context_token:
+            raise ContextRequiredError(target)
 
         if media_ref:
             if not media_ref.get("encrypt_query_param") or not media_ref.get("aes_key"):
@@ -553,16 +612,18 @@ class AccountRuntime:
             )
         )
 
-        msg = self.api.build_media_message(target, context_token or "", items)
-        if not context_token:
-            msg["from_user_id"] = creds.account_id
-            msg.pop("context_token", None)
-        await self.api.send_message(creds.base_url, creds.token, msg)
+        msg = self.api.build_media_message(target, context_token, items)
+        try:
+            await self.api.send_message(creds.base_url, creds.token, msg)
+        except ApiError as e:
+            if _is_prepare_failed(e):
+                raise ContextRequiredError(target, stale=True) from e
+            raise
         return {
             "to_user_id": target,
             "media_type": media_type_name(mt),
             "file_name": file_name or "",
-            "mode": mode,
+            "mode": "reply",
         }
 
     def upload_media(
@@ -584,6 +645,23 @@ class AccountRuntime:
             )
         )
 
+    def upload_media_bytes(
+        self,
+        media_type: Any,
+        data: bytes,
+        *,
+        user_id: str | None = None,
+        file_name: str | None = None,
+    ) -> dict[str, Any]:
+        return self.call(
+            self._async_upload_media_bytes(
+                media_type,
+                user_id=user_id,
+                data=bytes(data),
+                file_name=file_name,
+            )
+        )
+
     async def _async_upload_media(
         self,
         media_type: Any,
@@ -594,8 +672,24 @@ class AccountRuntime:
         file_name: str | None,
     ) -> dict[str, Any]:
         mt = normalize_media_type(media_type)
-        target, _creds = self._resolve_target(user_id)
         data = resolve_media_data(file_path=file_path, data_base64=data_base64)
+        return await self._async_upload_media_bytes(
+            mt,
+            user_id=user_id,
+            data=data,
+            file_name=file_name,
+        )
+
+    async def _async_upload_media_bytes(
+        self,
+        media_type: Any,
+        *,
+        user_id: str | None,
+        data: bytes,
+        file_name: str | None,
+    ) -> dict[str, Any]:
+        mt = normalize_media_type(media_type)
+        target, _creds = self._resolve_target(user_id)
         upload = await self.bot.upload(data, target, int(mt))
         return {
             "media": _media_dict(upload.media),

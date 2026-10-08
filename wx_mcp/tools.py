@@ -35,7 +35,7 @@ def _media_ref_schema() -> dict[str, Any]:
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "list_accounts",
-        "description": "列出当前已保存/可用的微信账号及在线状态。",
+        "description": "列出当前已保存/可用的微信账号、昵称及在线状态。",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -68,6 +68,21 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "set_account_nickname",
+        "description": (
+            "设置账号的本地显示昵称（只影响 wx-mcp 内部展示，不会修改微信备注或账号）。"
+            "昵称最长 64 个字符，传入空字符串可清除昵称。"
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "本地账号标识"},
+                "nickname": {"type": "string", "description": "显示昵称；留空表示清除"},
+            },
+            "required": ["account_id", "nickname"],
+        },
+    },
+    {
         "name": "submit_verify_code",
         "description": "当登录需要配对码（need_verifycode）时，提交微信手机上显示的配对码。",
         "inputSchema": {
@@ -92,7 +107,11 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "send_message",
-        "description": "向微信账号发送文本消息。to_user_id 留空时发给该账号绑定的微信（自己），长文本会自动分段。",
+        "description": (
+            "向微信账号发送文本消息。需要该账号绑定的微信先给 bot 发过一条消息"
+            "（长轮询收到后获得 context_token），否则会返回 CONTEXT_REQUIRED。"
+            "to_user_id 留空时发给该账号绑定的微信（自己），长文本会自动分段。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -108,15 +127,19 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "send_media",
-        "description": "向微信账号发送多媒体消息（图片/文件/视频）。file_path 或 data_base64 二选一，或直接传 upload_media 返回的 media_ref。",
+        "description": (
+            "向微信账号发送多媒体消息（图片/文件/视频）。需要目标联系人先给 bot "
+            "发过一条消息（获得 context_token）。file_path 或 data_base64 二选一，"
+            "或直接传 upload_media 返回的 media_ref。"
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "account_id": {"type": "string"},
                 "media_type": _media_type_schema(),
                 "to_user_id": {"type": "string", "description": "接收人 user_id；留空则发给账号绑定的微信"},
-                "file_path": {"type": "string", "description": "服务器上的媒体文件路径"},
-                "data_base64": {"type": "string", "description": "媒体文件内容的 base64 编码"},
+                "file_path": {"type": "string", "description": "wx-mcp 服务所在服务器上的媒体文件路径"},
+                "data_base64": {"type": "string", "description": "媒体文件内容的 base64 编码（远程客户端可用）"},
                 "file_name": {"type": "string", "description": "文件名（file 类型建议提供）"},
                 "caption": {"type": "string", "description": "随媒体一起发送的说明文本"},
                 "media_ref": _media_ref_schema(),
@@ -133,8 +156,8 @@ TOOLS: list[dict[str, Any]] = [
                 "account_id": {"type": "string"},
                 "media_type": _media_type_schema(),
                 "to_user_id": {"type": "string", "description": "接收人 user_id；留空则使用账号绑定的微信"},
-                "file_path": {"type": "string", "description": "服务器上的媒体文件路径"},
-                "data_base64": {"type": "string", "description": "媒体文件内容的 base64 编码"},
+                "file_path": {"type": "string", "description": "wx-mcp 服务所在服务器上的媒体文件路径"},
+                "data_base64": {"type": "string", "description": "媒体文件内容的 base64 编码（远程客户端可用）"},
                 "file_name": {"type": "string", "description": "文件名（file 类型建议提供）"},
             },
             "required": ["account_id", "media_type"],
@@ -150,6 +173,7 @@ class ToolRegistry:
             "list_accounts": self._list_accounts,
             "login_account": self._login_account,
             "get_login_status": self._get_login_status,
+            "set_account_nickname": self._set_account_nickname,
             "submit_verify_code": self._submit_verify_code,
             "logout_account": self._logout_account,
             "send_message": self._send_message,
@@ -178,6 +202,11 @@ class ToolRegistry:
 
     def _get_login_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.manager.get_login_status(args.get("account_id"))
+
+    def _set_account_nickname(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.manager.set_account_nickname(
+            args.get("account_id"), args.get("nickname")
+        )
 
     def _submit_verify_code(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.manager.submit_verify_code(

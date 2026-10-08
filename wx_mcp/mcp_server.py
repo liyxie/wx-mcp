@@ -11,15 +11,29 @@ Only the ``tools`` capability is exposed, which is all wx-mcp needs.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 from . import __version__
 from .tools import ToolRegistry
 
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SERVER_NAME = "wx-mcp"
+_DEFAULT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def _max_upload_bytes() -> int:
+    raw = os.environ.get("WX_MCP_MAX_UPLOAD_BYTES")
+    if raw is None or not raw.strip():
+        return _DEFAULT_MAX_UPLOAD_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_UPLOAD_BYTES
+    return value if value > 0 else _DEFAULT_MAX_UPLOAD_BYTES
 
 
 class McpServer:
@@ -151,6 +165,9 @@ def run_stdio(server: McpServer) -> None:
 
 class _HttpHandler(BaseHTTPRequestHandler):
     server_ref: McpServer | None = None
+    upload_ref: Any = None
+
+    MAX_UPLOAD_BYTES = _max_upload_bytes()
 
     def log_message(self, fmt: str, *args: Any) -> None:
         return
@@ -204,11 +221,30 @@ class _HttpHandler(BaseHTTPRequestHandler):
                     "transport": "streamable-http",
                 }
             )
+        elif self.path.split("?", 1)[0] in ("/upload", "/files"):
+            self._send_json(
+                {
+                    "endpoint": "/upload",
+                    "method": "POST",
+                    "content_type": "application/octet-stream",
+                    "query": {
+                        "account_id": "required",
+                        "media_type": "image|file|video (default: file)",
+                        "to_user_id": "optional",
+                        "file_name": "optional",
+                    },
+                }
+            )
         else:
             self._send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:
-        if self.path.split("?", 1)[0] not in ("/", "/mcp"):
+        path = self.path.split("?", 1)[0]
+        if path in ("/upload", "/files"):
+            self._handle_upload()
+            return
+
+        if path not in ("/", "/mcp"):
             self._send_json({"error": "not found"}, 404)
             return
 
@@ -246,9 +282,65 @@ class _HttpHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(response, extra_headers=extra_headers)
 
+    def _handle_upload(self) -> None:
+        upload = self.upload_ref
+        if upload is None:
+            self._send_json({"error": "upload endpoint is not enabled"}, 503)
+            return
 
-def run_http(server: McpServer, host: str = "127.0.0.1", port: int = 18080) -> None:
+        query = parse_qs(urlparse(self.path).query)
+
+        def one(name: str) -> str:
+            values = query.get(name)
+            return values[0].strip() if values else ""
+
+        account_id = one("account_id")
+        media_type = one("media_type") or "file"
+        to_user_id = one("to_user_id") or None
+        file_name = one("file_name") or self.headers.get("X-File-Name") or ""
+
+        if not account_id:
+            self._send_json({"error": "account_id query parameter is required"}, 400)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_json({"error": "invalid Content-Length"}, 400)
+            return
+
+        if length <= 0:
+            self._send_json({"error": "request body is empty"}, 400)
+            return
+        if length > self.MAX_UPLOAD_BYTES:
+            self._send_json({"error": "file is too large"}, 413)
+            return
+
+        data = self.rfile.read(length)
+        try:
+            result = upload(
+                account_id=account_id,
+                media_type=media_type,
+                data=data,
+                to_user_id=to_user_id,
+                file_name=file_name or None,
+            )
+        except Exception as e:  # noqa: BLE001 - surfaced to the HTTP client
+            self._send_json({"error": f"{type(e).__name__}: {e}"}, 400)
+            return
+
+        self._send_json(result)
+
+
+def run_http(
+    server: McpServer,
+    host: str = "127.0.0.1",
+    port: int = 18080,
+    *,
+    upload_handler: Any = None,
+) -> None:
     _HttpHandler.server_ref = server
+    _HttpHandler.upload_ref = upload_handler
     httpd = ThreadingHTTPServer((host, port), _HttpHandler)
     print(f"[wx-mcp] MCP server listening on http://{host}:{port}", file=sys.stderr)
     try:
