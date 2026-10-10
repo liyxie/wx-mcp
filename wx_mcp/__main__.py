@@ -55,6 +55,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=os.environ.get("WX_MCP_BOT_AGENT"),
         help="UA-style bot_agent string sent in base_info",
     )
+    parser.add_argument(
+        "--api-key",
+        default=os.environ.get("WX_MCP_API_KEY"),
+        help="Optional secret required in Authorization: Bearer or X-API-Key headers",
+    )
     return parser.parse_args(argv)
 
 
@@ -81,6 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.host,
                 args.port,
                 upload_handler=manager.upload_media_bytes,
+                api_key=args.api_key,
             )
     except KeyboardInterrupt:
         pass

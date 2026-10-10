@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -166,6 +167,7 @@ def run_stdio(server: McpServer) -> None:
 class _HttpHandler(BaseHTTPRequestHandler):
     server_ref: McpServer | None = None
     upload_ref: Any = None
+    api_key: str | None = None
 
     MAX_UPLOAD_BYTES = _max_upload_bytes()
 
@@ -175,7 +177,10 @@ class _HttpHandler(BaseHTTPRequestHandler):
     def _cors(self) -> None:
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Mcp-Session-Id")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, Mcp-Session-Id, Authorization, X-API-Key",
+        )
 
     def _send_bytes(
         self,
@@ -206,6 +211,28 @@ class _HttpHandler(BaseHTTPRequestHandler):
             extra_headers=extra_headers,
         )
 
+    def _provided_api_key(self) -> str | None:
+        provided = self.headers.get("X-API-Key")
+        if provided:
+            return provided.strip()
+
+        authorization = self.headers.get("Authorization") or ""
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            return value.strip()
+        return None
+
+    def _authorized(self) -> bool:
+        if not self.api_key:
+            return True
+        provided = self._provided_api_key()
+        if provided and secrets.compare_digest(
+            provided.encode("utf-8"), self.api_key.encode("utf-8")
+        ):
+            return True
+        self._send_json({"error": "unauthorized"}, 401)
+        return False
+
     def do_OPTIONS(self) -> None:
         self.send_response(204)
         self._cors()
@@ -213,6 +240,8 @@ class _HttpHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] in ("/", "/mcp", "/health"):
+            if self.path.split("?", 1)[0] != "/health" and not self._authorized():
+                return
             self._send_json(
                 {
                     "name": SERVER_NAME,
@@ -222,6 +251,8 @@ class _HttpHandler(BaseHTTPRequestHandler):
                 }
             )
         elif self.path.split("?", 1)[0] in ("/upload", "/files"):
+            if not self._authorized():
+                return
             self._send_json(
                 {
                     "endpoint": "/upload",
@@ -240,6 +271,8 @@ class _HttpHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        if not self._authorized():
+            return
         if path in ("/upload", "/files"):
             self._handle_upload()
             return
@@ -338,9 +371,11 @@ def run_http(
     port: int = 18080,
     *,
     upload_handler: Any = None,
+    api_key: str | None = None,
 ) -> None:
     _HttpHandler.server_ref = server
     _HttpHandler.upload_ref = upload_handler
+    _HttpHandler.api_key = api_key
     httpd = ThreadingHTTPServer((host, port), _HttpHandler)
     print(f"[wx-mcp] MCP server listening on http://{host}:{port}", file=sys.stderr)
     try:

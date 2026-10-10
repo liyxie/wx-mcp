@@ -74,11 +74,18 @@ cd E:\MyWenJian\learn\wx-mcp
   "mcpServers": {
     "wx-mcp": {
       "type": "http",
-      "url": "http://127.0.0.1:18080/mcp"
+      "url": "http://127.0.0.1:18080/mcp",
+      "headers": {
+        "Authorization": "Bearer your-secret-key"
+      }
     }
   }
 }
 ```
+
+如果服务端设置了 `WX_MCP_API_KEY`，客户端必须在上面的 `headers` 中携带
+`Authorization: Bearer <key>` 或 `X-API-Key: <key>`；否则返回 `401 unauthorized`。
+`/health` 不校验密钥，供本地探活使用。
 
 本地 stdio：
 
@@ -88,7 +95,9 @@ cd E:\MyWenJian\learn\wx-mcp
     "wx-mcp": {
       "command": "E:/MyWenJian/learn/wx-mcp/.venv/Scripts/python.exe",
       "args": ["-m", "wx_mcp", "--transport", "stdio"],
-      "cwd": "E:/MyWenJian/learn/wx-mcp"
+      "env": {
+        "PYTHONPATH": "E:/MyWenJian/learn/wx-mcp"
+      }
     }
   }
 }
